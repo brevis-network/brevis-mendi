@@ -2,6 +2,7 @@ package circuits
 
 import (
 	"github.com/brevis-network/brevis-sdk/sdk"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 var (
@@ -9,12 +10,13 @@ var (
 )
 
 var (
-	FixPoint96 = sdk.ConstUint248("0x1000000000000000000000000")
-	U248X32    = sdk.ConstUint248(1 << 32)
-	U248X48    = sdk.ConstUint248(1 << 48)
-	U248X128   = sdk.ConstUint248("0x100000000000000000000000000000000")
-	U248X224   = sdk.ConstUint248("0x100000000000000000000000000000000000000000000000000000000")
-	U248X244   = sdk.ConstUint248("0x10000000000000000000000000000000000000000000000000000000000000")
+	FixPoint96  = sdk.ConstUint248("0x1000000000000000000000000")
+	U248X32     = sdk.ConstUint248(1 << 32)
+	U248X48     = sdk.ConstUint248(1 << 48)
+	U248X128    = sdk.ConstUint248("0x100000000000000000000000000000000")
+	U248X224    = sdk.ConstUint248("0x100000000000000000000000000000000000000000000000000000000")
+	U248X244    = sdk.ConstUint248("0x10000000000000000000000000000000000000000000000000000000000000")
+	ZeroBytes32 = sdk.ConstFromBigEndianBytes(hexutil.MustDecode("0x0000000000000000000000000000000000000000000000000000000000000000"))
 )
 
 type MendiDepthCircuit struct {
@@ -44,14 +46,25 @@ func (c *MendiDepthCircuit) Define(api *sdk.CircuitAPI, in sdk.DataInput) error 
 
 	storages := sdk.NewDataStream(api, in.StorageSlots)
 	sdk.AssertEach(storages, func(s sdk.StorageSlot) sdk.Uint248 {
-		return sdk.Uint248(api.Uint32.IsEqual(s.BlockNum, c.BlockNumber))
+		return api.Uint248.And(
+			sdk.Uint248(api.Uint32.IsEqual(s.BlockNum, c.BlockNumber)),
+			api.Uint248.IsEqual(s.Contract, c.PoolAddress),
+		)
 	})
 
 	slot0 := in.StorageSlots.Raw[0]
+	api.Bytes32.AssertIsEqual(slot0.Slot, ZeroBytes32)
 	values := api.Bytes32.ToBinary(slot0.Value)
 	priceX96Bits := api.Uint248.ToBinary(c.SqrtPriceX96, 160)
+	// Make sure priceX96 is correct
 	for i, v := range priceX96Bits {
-		api.Uint248.AssertIsEqual(v, values[i+96])
+		api.Uint248.AssertIsEqual(v, values[i])
+	}
+
+	// Make sure currentTick is correct
+	tickBits := api.Uint248.ToBinary(c.CurrentTick, 24)
+	for i, v := range tickBits {
+		api.Uint248.AssertIsEqual(v, values[i+160])
 	}
 
 	sqrtPriceX96TgtUp := c.getSqrtPriceX96Tgt(api, sdk.ConstUint248(1), c.SqrtPriceX96, TargetMarketDepth)
@@ -59,8 +72,18 @@ func (c *MendiDepthCircuit) Define(api *sdk.CircuitAPI, in sdk.DataInput) error 
 
 	amount := sdk.ConstUint248(0)
 
+	initialTickSlot := api.ToBytes32(sdk.ConstUint248(5))
 	liquidityCurrent := c.Liquidity
 	for i, nextTick := range c.NextTicks {
+		slotI := in.StorageSlots.Raw[i+1]
+		slotKeccak := api.Keccak256([]sdk.Bytes32{api.ToBytes32(nextTick), initialTickSlot}, []int32{256, 256})
+		api.Bytes32.AssertIsEqual(slotI.Slot, slotKeccak)
+		values := api.Bytes32.ToBinary(slotI.Value)
+		tickBits := api.Uint248.ToBinary(nextTick, 24)
+		for i, v := range tickBits {
+			api.Uint248.AssertIsEqual(v, values[i+128])
+		}
+		api.Uint248.AssertIsEqual(c.LiquidityABS[i], tickBits[23])
 		sqrtPriceX96Next := c.getSqrtRatioAtTick(api, nextTick)
 		api.Uint248.AssertIsLessOrEqual(sqrtPriceX96Next, sqrtPriceX96TgtUp)
 		api.Uint248.AssertIsLessOrEqual(sqrtPriceX96TgtDown, sqrtPriceX96Next)
